@@ -14,3 +14,6 @@ venv
 models
 api_key.txt
 bench/results/
+
+# RotorQuant reference sources (unlicensed; reading only, never commit)
+.rotref/

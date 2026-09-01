@@ -682,7 +682,8 @@ def _kvarn_fused_decode_stage2(
 def kvarn_decode_attention(
     query: torch.Tensor,                # [B, Hq, D]   fp16/bf16
     kv_cache: torch.Tensor,             # [num_blocks, num_kv_heads, TILE_BYTES] uint8
-    hadamard: torch.Tensor,             # [D, D]       fp32
+    rotation: torch.Tensor,             # [D, D]       fp32 — forward R (fallback)
+    rotation_inv: torch.Tensor,         # [D, D]       fp32 — Rᵀ (fallback)
     scale: float,
     cfg,
     impl,                               # KVarNAttentionImpl (has pool + scratch buffers)
@@ -717,13 +718,18 @@ def kvarn_decode_attention(
     N = B * Hq  # rows for the 2D Q rotation matmul
 
     # 1. Q rotation — single fp16 tensor-core matmul into the persistent buffer.
-    #    Use the SAME fp16 Hadamard the K/V store used (_H_fp16) so QKᵀ stays
-    #    invariant; the old fp32 path added two [N,D] copies + a slower fp32 GEMM
-    #    per layer for no accuracy benefit (H is orthonormal, well-conditioned).
-    H16 = impl._H_fp16 if impl._H_fp16 is not None else hadamard.to(torch.float16)
+    #    Use the SAME fp16 rotation the K/V store used (_H_fp16, whatever the
+    #    KVARN_ROTATION family is) so QKᵀ stays invariant; the old fp32 path
+    #    added two [N,D] copies + a slower fp32 GEMM per layer for no accuracy
+    #    benefit (the rotation is orthonormal, well-conditioned).
+    R16 = impl._H_fp16 if impl._H_fp16 is not None else rotation.to(torch.float16)
+    # rotorquant: the un-rotation (step 4) needs the INVERSE. The Hadamard is
+    # symmetric (H⁻¹ = H); planar/iso are not, so the pair's Rᵀ.
+    Rt16 = (impl._Ht_fp16 if impl._Ht_fp16 is not None
+            else rotation_inv.to(torch.float16))
     q_rot_fp16 = impl._q_rot_fp16_buf[:N]
     with torch.profiler.record_function("kvarn_q_rotation"):
-        torch.mm(query.reshape(N, D), H16, out=q_rot_fp16)
+        torch.mm(query.reshape(N, D), R16, out=q_rot_fp16)
 
     # 2+3. Attention. Two paths (KVARN_FUSED_DECODE, default fused):
     #   FUSED      — one kernel reads int4/pool directly, dequants in registers,
@@ -859,9 +865,10 @@ def kvarn_decode_attention(
             )
 
     # 4. Un-rotate output — single fp16 tensor-core matmul (V was rotated, so
-    #    the attention output lives in the rotated frame). out = out_rot · H.
+    #    the attention output lives in the rotated frame). out = out_rot · Rᵀ
+    #    (for the Hadamard Rᵀ == R).
     with torch.profiler.record_function("kvarn_output_unrotation"):
-        out_unrot = torch.mm(output_rot.reshape(N, D), H16)   # fresh fp16
+        out_unrot = torch.mm(output_rot.reshape(N, D), Rt16)   # fresh fp16
         return out_unrot.view(B, Hq, D).to(out_dtype)
 
 
@@ -904,9 +911,13 @@ def kvarn_verify_attention(
     group = cfg.group
     Nrows = NQ * Hq
 
-    H16 = (impl._H_fp16 if impl._H_fp16 is not None
-           else impl._hadamard(device).to(torch.float16))
-    q_rot = torch.mm(query.reshape(Nrows, D).to(torch.float16), H16)
+    # rotorquant: forward R for the Q rotation, Rᵀ for the un-rotations below
+    # (H16/R16 coincide for the symmetric Hadamard).
+    R16 = (impl._H_fp16 if impl._H_fp16 is not None
+           else impl._rotation(device).to(torch.float16))
+    Rt16 = (impl._Ht_fp16 if impl._Ht_fp16 is not None
+            else impl._rotation_inv(device).to(torch.float16))
+    q_rot = torch.mm(query.reshape(Nrows, D).to(torch.float16), R16)
 
     _qpk = Hq // Hk
     _qpk_pad = 1 << (_qpk - 1).bit_length() if _qpk > 1 else 1
@@ -968,7 +979,7 @@ def kvarn_verify_attention(
             out_flat.stride(0),
             D=D, NUM_KV_SPLITS=SPLITS, num_warps=2,
         )
-        out_unrot = torch.mm(out_rot.reshape(Nrows, D), H16)
+        out_unrot = torch.mm(out_rot.reshape(Nrows, D), Rt16)
         return out_unrot.view(NQ, Hq, D).to(out_dtype)
 
     common["VQ_INDIRECT"] = True
@@ -1021,7 +1032,7 @@ def kvarn_verify_attention(
             D=D, NUM_KV_SPLITS=SPLITS, num_warps=2,
         )
 
-    out_unrot = torch.mm(out_rot.reshape(Nrows, D), H16)
+    out_unrot = torch.mm(out_rot.reshape(Nrows, D), Rt16)
     return out_unrot.view(NQ, Hq, D).to(out_dtype)
 
 

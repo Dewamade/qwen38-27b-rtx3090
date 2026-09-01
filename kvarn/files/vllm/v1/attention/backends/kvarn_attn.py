@@ -2,10 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KVarN attention backend.
 
-KV-cache compression by Hadamard rotation + iterative variance-normalization
+KV-cache compression by rotation + iterative variance-normalization
 (Sinkhorn-like) + asymmetric RTN. K is quantized per-channel, V per-token —
 KIVI orientation. The variance-normalization tile equals the vLLM
 ``block_size`` (default and only supported value in this PR: ``128``).
+
+RotorQuant family: the rotation is selectable via ``KVARN_ROTATION`` —
+``hadamard`` (default, the historical Sylvester H, byte-identical behaviour)
+or the block-diagonal RotorQuant-family alternatives ``planar`` (2D Givens)
+and ``iso`` (4D quaternion left-multiplication; see
+``kvarn/rotor.py`` — note that in site-packages the module lives at
+``vllm/model_executor/layers/quantization/kvarn/rotor.py``). Only the
+forward sites (K/V on store, Q on read) and the un-rotation sites (output,
+dequant) differ: R is orthogonal but not symmetric, so those use Rᵀ.
+Everything else (Sinkhorn, RTN, packing, the int4 layout, flush/allocator,
+spec-decode, prefix cache, CUDA graphs) is rotation-agnostic.
 
 Cache layout (per block, per kv-head, ``head_dim=128, k_bits=4, v_bits=4``):
   17920 B = 8192 (K packed) + 256 + 256 + 256  (K absorbed scales + zp + s_row)
@@ -36,8 +47,6 @@ plan (kvarn_plan.md §2.1 items 1-12) for the rationale of each hunk.
 
 from __future__ import annotations
 
-import functools
-import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
@@ -81,21 +90,28 @@ if _HAS_FLASH_ATTN:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Hadamard cache (one D×D matrix per (head_dim, device))
+# Rotation (KVARN_ROTATION: hadamard | planar | iso)
 # ──────────────────────────────────────────────────────────────────────────────
+#
+# RotorQuant-family rotation dispatch. One D×D matrix per (head_dim, kind,
+# device), built once in the rotor module (fp32); each impl caches an fp16
+# copy for the GEMMs (`_H_fp16` = forward R, `_Ht_fp16` = inverse Rᵀ). The
+# historical Sylvester Hadamard construction moved to rotor._sylvester_
+# hadamard (bit-identical), so the default path is unchanged.
+#
+# NOTE on naming: `_H_fp16` / `_hadamard` survive as names for diff
+# minimisation across this 2.6k-line file — they mean "the forward rotation"
+# for whichever KVARN_ROTATION family is active. The inverse is `_Ht_fp16` /
+# `_rotation_inv`; they coincide (same object) for the symmetric Hadamard.
 
 
-@functools.cache
-def _hadamard_cached(d: int, device_str: str) -> torch.Tensor:
-    """Sylvester Hadamard, normalised, cached per (d, device)."""
-    H = torch.ones(1, 1)
-    while H.shape[0] < d:
-        H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
-    return (H / math.sqrt(d)).to(torch.device(device_str)).float()
+def _rotation_pair(d: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.kvarn.rotor import (
+        make_rotation_pair,
+        rotation_kind,
+    )
 
-
-def _build_hadamard(d: int, device: torch.device) -> torch.Tensor:
-    return _hadamard_cached(d, str(torch.device(device)))
+    return make_rotation_pair(d, rotation_kind(), str(device))
 
 
 def _sinkhorn_pack_kv(K_tiles, V_tiles, cfg):
@@ -1231,9 +1247,14 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
         self._block_to_slot_t: torch.Tensor | None = None  # [num_blocks] int32
         self._block_lookup_size: int = 0
 
-        # Cached fp16 Hadamard for the rotate-on-store matmul in
-        # do_kv_cache_update (avoids a per-call .float() cast that allocates).
+        # Cached fp16 ROTATION for the rotate-on-store matmul in
+        # do_kv_cache_update and the Q-rotation GEMMs (avoids a per-call
+        # .float() cast that allocates). `_H_fp16` = forward R for the active
+        # KVARN_ROTATION family (historically the Hadamard — name kept);
+        # `_Ht_fp16` = its inverse Rᵀ (the SAME object for the symmetric
+        # Hadamard, a distinct matrix for planar/iso).
         self._H_fp16: torch.Tensor | None = None
+        self._Ht_fp16: torch.Tensor | None = None
 
         # Store-side rotation scratch (pre-allocated by _ensure_pool so the
         # captured forward never allocates). Shapes:
@@ -1384,9 +1405,12 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
         self._block_to_slot_t = cls._block_to_slot_t_per_device[mkey]
         self._block_lookup_size = self._block_to_slot_t.shape[0]
 
-        # Cached fp16 Hadamard for the rotate-on-store matmul.
+        # Cached fp16 rotation (forward + inverse) for the rotate-on-store
+        # matmul and the Q-rotation / un-rotation GEMMs.
         if self._H_fp16 is None:
-            self._H_fp16 = self._hadamard(device).to(torch.float16).contiguous()
+            R, Rt = self._rotation_pair(device)
+            self._H_fp16 = R.to(torch.float16).contiguous()
+            self._Ht_fp16 = (R if R is Rt else Rt).to(torch.float16).contiguous()
 
         # One-time flush-kernel warmup (issue #15). The Sinkhorn + int4-store
         # kernels are exercised ONLY at a tile-boundary flush, which never
@@ -1732,8 +1756,23 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
             return None
         return getattr(md, "slot_mapping_cpu", None)
 
+    # RotorQuant family: the fp32 rotation pair for this layer's head dim.
+    # `_rotation` = forward R (rotate in), `_rotation_inv` = Rᵀ (rotate out);
+    # identical objects for the symmetric Hadamard. The fp16 fast path is
+    # `_H_fp16` / `_Ht_fp16` (see __init__).
+    def _rotation_pair(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        return _rotation_pair(self.head_size, device)
+
+    def _rotation(self, device: torch.device) -> torch.Tensor:
+        return self._rotation_pair(device)[0]
+
+    def _rotation_inv(self, device: torch.device) -> torch.Tensor:
+        return self._rotation_pair(device)[1]
+
     def _hadamard(self, device: torch.device) -> torch.Tensor:
-        return _build_hadamard(self.head_size, device)
+        # Kept as an alias of the forward rotation (name survives for the
+        # triton driver's fallback kwarg); returns R, whatever the family.
+        return self._rotation(device)
 
     def _flat_block(self, kv_cache: torch.Tensor, block_id: int, head: int) -> torch.Tensor:
         """Contiguous ``[tile_bytes_aligned]`` uint8 view for one (block, head).
@@ -1795,7 +1834,10 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
         K_out = torch.empty(group, self.num_kv_heads, D, dtype=torch.float16, device=device)
         V_out = torch.empty(group, self.num_kv_heads, D, dtype=torch.float16, device=device)
 
-        H = self._hadamard(device)  # [D, D] fp32
+        # rotorquant: un-rotation needs the INVERSE (Rᵀ), not the forward R —
+        # only the symmetric Hadamard makes the two coincide (the old code
+        # `@ H` worked because H⁻¹ = H).
+        Rt = self._rotation_inv(device)  # [D, D] fp32
 
         for h in range(self.num_kv_heads):
             flat = self._flat_block(kv_cache, block_id, h)
@@ -1811,8 +1853,9 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
             s_row_K = flat[cfg.k_s_row_offset:cfg.k_s_row_offset + group * 2].view(torch.float16)
             K_rot_DG = kvarn_dequant_tile_k(
                 k_packed, s_col_K, zp_K, s_row_K, group=group, bits=cfg.key_bits)
-            # Un-rotate: [D, group] → [group, D] (= K rows-tokens), then ⋅H to undo rotation
-            K_unrot = K_rot_DG.T @ H  # [group, D]
+            # Un-rotate: [D, group] → [group, D] (= K rows-tokens), then ⋅Rᵀ to
+            # undo the on-store rotation.
+            K_unrot = K_rot_DG.T @ Rt  # [group, D]
             K_out[:, h, :] = K_unrot.to(torch.float16)
 
             # V side. V is packed at cfg.value_bits — for the default k4v2
@@ -1828,7 +1871,7 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
             zp_V = flat[cfg.v_zp_offset:cfg.v_zp_offset + group * 2].view(torch.float16)
             V_rot_GD = kvarn_dequant_tile_v(
                 v_packed, s_col_V, s_row_V, zp_V, head_dim=D, bits=cfg.value_bits)
-            V_unrot = V_rot_GD @ H  # [group, D]
+            V_unrot = V_rot_GD @ Rt  # [group, D]
             V_out[:, h, :] = V_unrot.to(torch.float16)
 
         return K_out, V_out
@@ -2278,11 +2321,12 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
 
         # Stage α-2: pool stores ROTATED K/V indexed by block_id directly.
         # The slow fallback consumer (_decode_path_slow → SDPA) expects
-        # un-rotated K/V, so apply H^-1 (= H^T for orthonormal H).
-        H = self._hadamard(device)                                # [D, D] fp32
+        # un-rotated K/V, so apply the inverse rotation (R.T — for the
+        # symmetric Hadamard that is H itself).
+        R = self._rotation(device)                                # [D, D] fp32
 
         def _unrot_pool(x: torch.Tensor) -> torch.Tensor:
-            return (x.float() @ H.T).to(torch.float16)
+            return (x.float() @ R.T).to(torch.float16)
 
         # Stage α-2: a block lives in the fp16 pool iff it has a slot
         # (sinks + in-progress tails). Flushed blocks have their slot freed
@@ -2347,7 +2391,8 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
         return kvarn_decode_attention(
             query=q,
             kv_cache=kv_cache,
-            hadamard=self._hadamard(q.device),
+            rotation=self._rotation(q.device),
+            rotation_inv=self._rotation_inv(q.device),
             scale=self.scale,
             cfg=self.kvarn_config,
             impl=self,
@@ -2563,13 +2608,17 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
             num_warps=4, num_stages=2,
         )
 
-        # The packed K/V are in the rotated frame (the store path rotates before
-        # quantizing / pooling), so rotate q in and un-rotate the output — same
-        # fp16 Hadamard as the store side, so QK^T is invariant.
-        H16 = (self._H_fp16 if self._H_fp16 is not None
-               else self._hadamard(q.device).to(torch.float16))
+        # The packed K/V are in the rotated frame (the store path rotates
+        # before quantizing / pooling), so rotate q in and un-rotate the
+        # output — same fp16 rotation as the store side, so QK^T is
+        # invariant. The un-rotation uses the INVERSE (Rᵀ): a no-op swap for
+        # the symmetric Hadamard, required for planar/iso.
+        R16 = (self._H_fp16 if self._H_fp16 is not None
+               else self._rotation(q.device).to(torch.float16))
+        Rt16 = (self._Ht_fp16 if self._Ht_fp16 is not None
+                else self._rotation_inv(q.device).to(torch.float16))
         n_tok = q.shape[0]
-        q_rot = torch.mm(q.reshape(-1, D), H16).view(n_tok, self.num_heads, D)
+        q_rot = torch.mm(q.reshape(-1, D), R16).view(n_tok, self.num_heads, D)
         out_rot = self._flash_varlen(
             q_rot, K_packed[:total_k], V_packed[:total_k],
             cu_q=md.query_start_loc[:B + 1],
@@ -2578,7 +2627,7 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
             max_k=max_k,
             causal=_causal_bool(getattr(md, "causal", True)),  # port(0.27.1)
         )
-        return torch.mm(out_rot.reshape(-1, D), H16).view(
+        return torch.mm(out_rot.reshape(-1, D), Rt16).view(
             n_tok, self.num_heads, D)
 
     def _mixed_batch_path(
