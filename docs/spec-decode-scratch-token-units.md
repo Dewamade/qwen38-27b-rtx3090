@@ -293,7 +293,12 @@ The model-load figure rises by the allocation; the torch peak is unchanged; the 
 the allocation plus -31 to +51 MiB. With stock boots reproducing to the token, that remainder is
 the allocator's segment behaviour at load, the true cost, with the right sign. At `MAX_SEQS=32`
 free VRAM after boot goes 319 to 1,323 MiB, out of the burst zone, for about 22k of 230k KV tokens.
-That is the price the review asked to have made visible.
+That is the price the review asked to have made visible. One more condition for anyone adding rows: the
+same 3090 booted from the container image instead of the native venv gives identical builders, capacity,
+scratch and model-load figures but a profiled budget about 30 MiB larger and a resident figure about
+500 MiB smaller, before any patch (native stock repeats were digit-identical, so that is the container
+environment, not noise). Compare patched against stock within one arm; never a native row against an
+image row.
 
 **4090, WSL2** (`CTX=long`, `MAX_LEN=81920`, k=7, `PREFIX_CACHE=1`, `GPU_UTIL=0.93`; compile cache
 disabled on every boot, so each profiles cold: the first series mixed a cold and a warm stock boot
