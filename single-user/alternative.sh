@@ -64,7 +64,10 @@ VISION_ARGS="--language-model-only"
 PREFIX_ARGS=""
 [ "$PREFIX_CACHE" = 1 ] && PREFIX_ARGS="--enable-prefix-caching --mamba-cache-mode align"
 
-ASYNC_ARGS=$([ "$ASYNC_SCHED" = 1 ] && echo --async-scheduling || echo --no-async-scheduling)
+# Array, not $( ... || echo ... ): the fallback makes it errexit-safe, but an
+# unquoted expansion still word-splits; match SPEC_ARGS/METRICS_ARGS.
+ASYNC_ARGS=(--no-async-scheduling)
+[ "$ASYNC_SCHED" = 1 ] && ASYNC_ARGS=(--async-scheduling)
 
 # REQ_METRICS=1: per-request timing fields + usage on every response (issue #51).
 # Not with --disable-log-stats (the timing fields need the engine-stats path).
@@ -83,7 +86,7 @@ exec vllm serve "$MODEL" \
   ${VISION_ARGS} \
   ${ATTN_ARGS} \
   --mamba-ssm-cache-dtype float16 \
-  ${ASYNC_ARGS} \
+  "${ASYNC_ARGS[@]}" \
   --max-num-batched-tokens 2048 \
   "${SPEC_ARGS[@]}" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \

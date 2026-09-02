@@ -105,7 +105,10 @@ fi
 # 0.27.1, which is the tool-side adapter of the same parser engine that
 # --reasoning-parser qwen3 already uses (vllm/parser/qwen3.py).
 TOOL_PARSER=${TOOL_PARSER:-qwen3_coder}
-TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
+# Array, not $( [ ] && echo ): exits 1 when TOOLS is off (the shape #59 fixed)
+# and word-splits $TOOL_PARSER; the array keeps the parser as one element.
+TOOL_ARGS=()
+[ "${TOOLS:-1}" = 1 ] && TOOL_ARGS=(--enable-auto-tool-choice --tool-call-parser "$TOOL_PARSER")
 
 # REQ_METRICS=1: per-request timing fields + usage on every response (issue #51).
 # Not with --disable-log-stats (the timing fields need the engine-stats path).
@@ -192,5 +195,5 @@ exec venv/bin/vllm serve "$MODEL" \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
   "${METRICS_ARGS[@]}" \
-  ${TOOL_ARGS} \
+  "${TOOL_ARGS[@]}" \
   ${EXTRA_ARGS}
