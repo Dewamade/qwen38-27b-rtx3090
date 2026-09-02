@@ -514,7 +514,14 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     transfer to the other in either direction. The detector is the one that found it: a
     prompt-length ladder against a known-good rate. On WSL, ladder any `KV_MEM` above
     stock before trusting it; the launcher now prints a warning when the pin exceeds
-    the profile default.
+    the profile default. A cheaper live check, from a second WSL2 box in
+    [#61](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/61): `nvidia-smi dmon`
+    while it generates. Healthy decode on a 24 GB card is high SM occupancy *and*
+    high power draw; host-backed memory shows as **SM near 100% at only 100-200 W**,
+    because the SMs are stalled on PCIe rather than doing work. That reporter's rule
+    of thumb — keep ~2 GB of VRAM free by lowering `GPU_UTIL`, and do not chase the
+    context back with `MAX_LEN`, since the pool is sized by `GPU_UTIL` — matches the
+    two boxes above.
 
     The launcher warns above 12 seats rather than clamping, because unlike `CG` this is
     a VRAM budget rather than a shape: a card bigger than 24 GiB has room where this
