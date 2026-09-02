@@ -108,7 +108,13 @@ INT8_LAYERS=${INT8_LAYERS-mlp|linear_attn|self_attn}
 # PREFILL_ATTN=int8: int8-QK Triton attention for the hd256 full-attention
 # layers during prefill (patches/triton-prefill-attn-int8.patch): 1.27-1.35x FA2 on
 # the attention itself, worth up to ~+5% end-to-end at 51k on top of INT8_ACT
-# (1,839/1,498 tok/s at 16k/51k with both on). Prefill-only; decode and the
+# (1,839/1,498 tok/s at 16k/51k with both on). It is a companion to INT8_ACT, not
+# a standalone switch: on its own it moves prefill +0.3/+1.1/+3.3% at 4k/16k/51k
+# here (1,167/1,126/1,012 against 1,164/1,114/980 stock, two interleaved arms
+# reproducing to 0.1%), because without the int8 GEMMs attention is a smaller
+# share of prefill. A WSL2 3090 measured it 1-6% *negative* standalone (#62), so
+# the honest range for PREFILL_ATTN alone is "within a few percent either way" --
+# set INT8_ACT with it or leave it off. Prefill-only; decode and the
 # split-KV verify keep their existing paths. fp16 selects the same kernel
 # without quantization (a debugging mode); empty keeps FA2.
 PREFILL_ATTN=${PREFILL_ATTN-}
