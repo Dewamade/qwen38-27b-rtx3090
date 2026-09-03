@@ -324,3 +324,23 @@ outside the budget is gone; half of it is the pool's now and half came back as h
 The boot line still states the capacity formula as a sentence (above). It now also states where
 each set was allocated and which builders adopted it, which is the part this follow-up needed
 auditable.
+
+### Depth 15, the band the sizing was written for (2026-09-03)
+
+With #63 in (dfee877) depth 15 boots on the int4 path. RTX 4090 under WSL2, the container image built
+from main, `alternative.sh` int4, `DFLASH_TOKENS=15`, `MAX_LEN=32768`, `MAX_SEQS=4`, `VLLM_INT4_MQ_3D=1`,
+`VLLM_INT4_MQ_3D_DEBUG=1`, two tool-calling conversations (about 60 chat completions each) plus one
+short bench per boot:
+
+- Stock main: pool 43,866 tokens; the scratch declares capacity 64 query tokens (min(max_num_seqs=4,
+  seq_threshold_3D=32) x max_query_len_3d=16). Dispatch census: 712 verify-shaped batches
+  (max_seqlen_q <= 16), all 712 on the 3D path, 0 capacity fallbacks, breach_count 0, no DEGRADED
+  line; every width in the 9..16 band present (4 sequences at 10, 12, 14 and 16 query tokens; 1 to 3
+  sequences at 16). The 4,223 prefill chunks (max_seqlen_q 1840) took 2D by the query-length policy.
+- This patch applied at boot: two sets allocated at model load (24.19 MiB at 396,288 B/row and 32.25 MiB
+  at 528,384 B/row, 56.44 MiB together), all four builders adopted, zero "AFTER the memory profile"
+  lines. `Model loading took` 15.92 to 15.98 GiB, `Available KV cache memory` 4.81 to 4.75 GiB, pool
+  43,866 to 43,338 tokens. Same census, same no-fallback result.
+- Quality (thinking off): stock, judgment 8/8, mission 14/18 twice; 3D path off, judgment 6/8, mission
+  15/18 twice; this patch, judgment 6/8, mission 16/18. No repetition or truncation in any row; the
+  judgment bench moves two decisions between boots of the same configuration, so those are noise-shaped.
