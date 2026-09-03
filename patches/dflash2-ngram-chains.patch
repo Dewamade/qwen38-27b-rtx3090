@@ -93,7 +93,7 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
          if not self._adaptive:
              return None
          emitted = getattr(self, "last_num_emitted", None)
-@@ -313,7 +370,252 @@
+@@ -313,7 +370,253 @@
              long_block, self._sticky = False, 0
          self._prev_want = want
          return self.num_speculative_steps if long_block else self.draft_block
