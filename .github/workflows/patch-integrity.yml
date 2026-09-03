@@ -25,4 +25,4 @@ jobs:
           fetch-depth: 1
 
       - name: Validate patch series with git apply
-        run: bash patches/check_vllm_series.sh .ci/vllm
+        run: bash patches/check_vllm_series.sh .ci/vllm/vllm
