@@ -14,4 +14,3 @@ venv
 models
 api_key.txt
 bench/results/
-kv-persist-cache/
