@@ -110,7 +110,7 @@ This replaces the pre-0.28 DFlash2 backport: 0.28.0 already ships the native DFl
          )
  
      def _build_draft_attn_metadata(
-@@ -329,6 +358,11 @@
+@@ -329,6 +358,10 @@
          is_profile: bool = False,
      ) -> torch.Tensor:
          num_reqs = input_batch.num_reqs
