@@ -44,6 +44,16 @@ capture sizes after the model loads, so a builder may derive a capacity the
 Impl did not: smaller adopts the larger pool (declared capacity = the pool's,
 asserted >= derived), larger takes the WARNING path.
 
+SUPERSEDES
+
+Supersedes: spec-decode-scratch-token-units.patch
+
+Both still apply, in glob order, and both are required: this patch is a diff
+against the tree that one produces. But it rewrites the region that one added,
+so the older patch's lines are no longer in the tree and verify.sh's content
+check cannot find them. The declaration above is what lets verify.sh say so
+instead of reporting a false failure.
+
 SCOPE
 
 One file, v1/attention/backends/triton_attn.py. Applies after
