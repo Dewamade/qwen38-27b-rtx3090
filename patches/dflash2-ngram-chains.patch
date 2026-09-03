@@ -93,7 +93,7 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
          if not self._adaptive:
              return None
          emitted = getattr(self, "last_num_emitted", None)
-@@ -313,7 +370,253 @@
+@@ -313,7 +370,252 @@
              long_block, self._sticky = False, 0
          self._prev_want = want
          return self.num_speculative_steps if long_block else self.draft_block
@@ -243,11 +243,8 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
 +        self.draft_max_seq_len = min(
 +            max_seq_len + self.num_query_per_req, self.max_model_len
 +        )
-+        # vLLM's rejection sampler returns num_sampled as the accepted/emitted
-+        # token count; num_rejected is only discarded verify positions.
-+        # Keep the accepted count for adaptive verify-length scheduling.
 +        self.last_num_emitted = (
-+            num_sampled if num_sampled is not None else None
++            (num_sampled - num_rejected) if num_sampled is not None else None
 +        )
 +
 +        if aux_hidden_states:

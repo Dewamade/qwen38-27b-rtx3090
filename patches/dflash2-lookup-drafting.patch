@@ -110,14 +110,15 @@ This replaces the pre-0.28 DFlash2 backport: 0.28.0 already ships the native DFl
          )
  
      def _build_draft_attn_metadata(
-@@ -329,6 +358,10 @@
+@@ -329,6 +358,11 @@
          is_profile: bool = False,
      ) -> torch.Tensor:
          num_reqs = input_batch.num_reqs
-+        # vLLM's rejection sampler returns num_sampled as the accepted/emitted
-+        # token count; num_rejected is only discarded verify positions. Keep
-+        # the accepted count for adaptive verify-length scheduling.
-+        self.last_num_emitted = num_sampled if num_sampled is not None else None
++        # What the step that just ran actually produced per request: num_sampled counts the
++        # sampling slots it was given (bonus + drafts), num_rejected how many of those were
++        # thrown away, so the difference is the tokens it emitted. dflash2/lookup.py decides
++        # the next block length from it.
++        self.last_num_emitted = (num_sampled - num_rejected) if num_sampled is not None else None
          num_target_tokens = input_batch.num_tokens
          num_query_tokens = num_reqs * self.num_query_per_req
          max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
