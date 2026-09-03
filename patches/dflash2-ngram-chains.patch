@@ -1,9 +1,5 @@
-Drafter-free n-gram chains for DFlash2 (VLLM_DFLASH2_CHAIN=1, default off), ported to vLLM 0.28.0.
-
-The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch then adds the host-side chain state machine and eager context-only proposal path.
-
---- generated against the v0.28.0 lookup tree ---
-
+diff --git a/v1/worker/gpu/spec_decode/dflash2/speculator.py b/v1/worker/gpu/spec_decode/dflash2/speculator.py
+index 9d299de5a..1371aab30 100644
 --- a/v1/worker/gpu/spec_decode/dflash2/speculator.py
 +++ b/v1/worker/gpu/spec_decode/dflash2/speculator.py
 @@ -2,6 +2,7 @@
@@ -14,7 +10,7 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
  from typing import Any
  
  import torch
-@@ -11,7 +12,10 @@
+@@ -11,7 +12,10 @@ from vllm.config import VllmConfig
  from vllm.logger import init_logger
  from vllm.triton_utils import tl, triton
  from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
@@ -26,11 +22,10 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
  
  logger = init_logger(__name__)
  from vllm.v1.worker.gpu.spec_decode.dflash2.lookup import (
-@@ -254,6 +258,54 @@
-         # an otherwise identical 4-way batch, and reproducibly did not with STICKY=0.
+@@ -255,6 +259,54 @@ class DFlash2Speculator(DFlashSpeculator):
          self._lookup_sticky = int(os.environ.get("VLLM_DFLASH2_LOOKUP_STICKY", "3"))
          self._sticky = 0
-+
+ 
 +        # --- drafter-free chains (VLLM_DFLASH2_CHAIN=1), ported from
 +        # Dmtrii-tesla/dflash2-ngram-vllm (#38) -------------------------------
 +        # While a request keeps reproducing its own context, whole verify
@@ -78,10 +73,11 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
 +            self._chain_steps_engaged = 0
 +            self._chain_last_log = time.monotonic()
 +            logger.info("DFlash2 chains on (minmatch=%d)", self._chain_minmatch)
- 
++
          if self._lookup:
              logger.info(
-@@ -277,6 +329,11 @@
+                 "DFlash2 lookup-augmented drafting on (k=%d nmin=%d nmax=%d nstrong=%d "
+@@ -277,6 +329,11 @@ class DFlash2Speculator(DFlashSpeculator):
          unanimity across the batch. Below CHEAP_CTX tokens of context an extra verify
          position is nearly free (+6% per step at 1.5k against +27% at 25k), so there the
          flag alone is enough."""
@@ -93,11 +89,10 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
          if not self._adaptive:
              return None
          emitted = getattr(self, "last_num_emitted", None)
-@@ -313,7 +370,252 @@
-             long_block, self._sticky = False, 0
+@@ -314,6 +371,251 @@ class DFlash2Speculator(DFlashSpeculator):
          self._prev_want = want
          return self.num_speculative_steps if long_block else self.draft_block
-+
+ 
 +    def propose(
 +        self,
 +        input_batch,
@@ -194,7 +189,7 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
 +            mm_inputs=mm_inputs,
 +            is_profile=is_profile,
 +        )
- 
++
 +    def _chain_should_engage(self, prev_missed: bool) -> bool:
 +        """Host-side chain state machine. Entry: the last NORMAL step's longest
 +        match reached minmatch (read from pinned memory; one step stale like
@@ -346,7 +341,7 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
      def set_req_states(self, req_states) -> None:
          """The token history the lookup matches against (set by the model runner)."""
          self._req_states = req_states
-@@ -326,6 +628,10 @@
+@@ -326,6 +628,10 @@ class DFlash2Speculator(DFlashSpeculator):
      def set_sampling_states(self, sampling_states) -> None:
          self._req_top_p = sampling_states.top_p.gpu
          self._req_top_k = sampling_states.top_k.gpu
@@ -357,7 +352,7 @@ The native 0.28 DFlash2 runner is extended by the lookup patch first; this patch
  
      def _sample_path(
          self,
-@@ -479,3 +785,16 @@
+@@ -479,3 +785,16 @@ class DFlash2Speculator(DFlashSpeculator):
              BLOCK_K=block_k,
              num_warps=1,
          )

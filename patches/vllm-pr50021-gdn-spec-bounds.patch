@@ -1,19 +1,3 @@
-vLLM PR #50021 (open at the time of writing): bound accepted-token state
-lookups in the Gated DeltaNet / Mamba speculative-decode kernels.
-
-The fused_recurrent / fused_sigmoid_gating / causal_conv1d / selective-scan
-kernels index the recurrent-state slot with (num_accepted_tokens - 1) without
-checking it against the row width; stale or oversized counts produce wild GPU
-addresses. Vendored here (kernel hunks only; the mamba_utils.py prefix-caching
-hunks of the PR are not needed with this repo's v0.28.0 prefix-caching
-off) because we hit illegal-memory-access crashes with several concurrent MTP
-requests. Note: it does NOT fix the k=4 crash described in single-user/README.md.
-
-Apply from the installed vllm package directory:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/vllm-pr50021-gdn-spec-bounds.patch
-
-Source: https://github.com/vllm-project/vllm/pull/50021 (Apache-2.0).
-
 diff --git a/model_executor/layers/mamba/ops/causal_conv1d.py b/model_executor/layers/mamba/ops/causal_conv1d.py
 index 8335c8496..e7387484c 100644
 --- a/model_executor/layers/mamba/ops/causal_conv1d.py
@@ -161,4 +145,3 @@ index 7e0c7e05c..261befff8 100644
                  return
              p_h0 = h0 + state_idx * stride_init_state_token
          else:
-

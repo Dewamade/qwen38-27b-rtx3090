@@ -1,5 +1,5 @@
 diff --git a/v1/worker/gpu/spec_decode/dflash/speculator.py b/v1/worker/gpu/spec_decode/dflash/speculator.py
-index 4ad1b10ba..c28a42115 100644
+index 1bd78be21..0556bcbb4 100644
 --- a/v1/worker/gpu/spec_decode/dflash/speculator.py
 +++ b/v1/worker/gpu/spec_decode/dflash/speculator.py
 @@ -362,7 +362,7 @@ class DFlashSpeculator(DraftModelSpeculator):
