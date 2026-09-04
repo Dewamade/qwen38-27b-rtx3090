@@ -14,3 +14,5 @@ venv
 models
 api_key.txt
 bench/results/
+# DSH harness session artifacts
+.dsh-project-memory/
